@@ -50,9 +50,11 @@ async function downloadModels() {
     env.cacheDir = modelsDir;
     
     try {
-        // 1. Embedding model (RAG)
-        console.log('[download-models] Downloading Xenova/all-MiniLM-L6-v2...');
-        await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
+        // 1. Embedding model (RAG). dtype:'q8' fetches model_quantized.onnx
+        //    (~22MB) — the variant the runtime worker now loads and the one
+        //    listed in REQUIRED_MODEL_FILES — instead of fp32 model.onnx (~86MB).
+        console.log('[download-models] Downloading Xenova/all-MiniLM-L6-v2 (q8)...');
+        await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', { dtype: 'q8' });
         console.log('[download-models] all-MiniLM-L6-v2 downloaded.');
 
         // 2. Zero-shot classification model (Intent Classifier)

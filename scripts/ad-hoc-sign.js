@@ -80,6 +80,61 @@ function verifyPackedNativeArch(appPath, targetArchName) {
     console.log(`[Arch Guard] All packed native binaries match target arch ${targetArchName} ✅`);
 }
 
+// ─── Foreign-platform onnxruntime-node prune ───
+// onnxruntime-node ships prebuilt binaries for EVERY platform in one package
+// (~236MB): bin/napi-v<N>/{darwin,linux,win32}/{x64,arm64}. A single-arch mac DMG
+// only ever loads darwin/<targetArch> (~31MB) — the other ~180MB is dead weight
+// that still gets copied into the .app and inflates the DMG. This deletes every
+// bin/napi-v<N>/<os>/<arch> dir that is not darwin/<targetArch>. Arch-aware (keys
+// off the build's real target arch), so it is correct for both the x64 and arm64
+// mac packs, never the wrong-arch one. Runs before signing so pruned files are
+// never signed. Idempotent: a missing/already-pruned dir is a no-op.
+function dirSizeBytes(dir) {
+    let total = 0;
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const p = path.join(dir, entry.name);
+        total += entry.isDirectory() ? dirSizeBytes(p) : fs.statSync(p).size;
+    }
+    return total;
+}
+
+function pruneForeignOnnxBinaries(appPath, targetArchName) {
+    if (targetArchName !== 'x64' && targetArchName !== 'arm64') return;
+    const binDir = path.join(
+        appPath, 'Contents', 'Resources', 'app.asar.unpacked',
+        'node_modules', 'onnxruntime-node', 'bin'
+    );
+    if (!fs.existsSync(binDir)) {
+        console.warn('[ONNX Prune] onnxruntime-node/bin not found (layout change?) — skipping.');
+        return;
+    }
+    // The native binaries live under a NAPI-ABI dir (napi-v3, napi-v6, …) whose
+    // exact version tracks the onnxruntime-node release — match whatever is here
+    // rather than hardcoding it, so a version bump can't silently no-op the prune.
+    const napiDirs = fs.readdirSync(binDir).filter((d) => /^napi-v\d+$/.test(d));
+    if (napiDirs.length === 0) {
+        console.warn('[ONNX Prune] no napi-v* dir under onnxruntime-node/bin — skipping.');
+        return;
+    }
+    let freed = 0;
+    for (const napi of napiDirs) {
+        const napiDir = path.join(binDir, napi);
+        for (const os of fs.readdirSync(napiDir)) {
+            const osDir = path.join(napiDir, os);
+            if (!fs.statSync(osDir).isDirectory()) continue;
+            for (const arch of fs.readdirSync(osDir)) {
+                if (os === 'darwin' && arch === targetArchName) continue; // keep the one we load
+                const archDir = path.join(osDir, arch);
+                if (!fs.statSync(archDir).isDirectory()) continue;
+                freed += dirSizeBytes(archDir);
+                fs.rmSync(archDir, { recursive: true, force: true });
+                console.log(`[ONNX Prune] removed ${napi}/${os}/${arch}`);
+            }
+        }
+    }
+    console.log(`[ONNX Prune] freed ${(freed / 1e6).toFixed(0)}MB (kept darwin/${targetArchName}).`);
+}
+
 // ─── Helper Disguise Configuration ───
 // Display name used for helper processes in Activity Monitor
 const DISGUISE_BASE = 'CoreServices';
@@ -129,6 +184,9 @@ function disguiseHelperPlists(appOutDir, appName) {
     console.log('[Helper Disguise] All helper plists updated successfully.');
 }
 
+// Exported for unit testing (scripts/__tests__/adHocSignPrune.test.mjs); not used by electron-builder.
+exports.pruneForeignOnnxBinaries = pruneForeignOnnxBinaries;
+
 exports.default = async function (context) {
     // Only process on macOS
     if (process.platform !== 'darwin') {
@@ -145,6 +203,17 @@ exports.default = async function (context) {
     // means the DMG for this arch would crash on launch — fail loudly now.
     const targetArchName = ebArchToName(context.arch);
     verifyPackedNativeArch(appPath, targetArchName);
+
+    // ── Step 0.5: Prune foreign-platform ONNX binaries (before signing) ──
+    // onnxruntime-node ships all 6 platform/arch binaries (~236MB); this arm64
+    // mac pack only loads darwin/arm64. Delete the rest so they never get signed
+    // or shipped in the DMG. Runs after the arch guard so we only ever keep the
+    // arch we just verified is correct.
+    try {
+        pruneForeignOnnxBinaries(appPath, targetArchName);
+    } catch (error) {
+        console.warn('[ONNX Prune] non-fatal failure:', error.message);
+    }
 
     // ── Step 1: Disguise helper display names (before signing) ──
     // This MUST run regardless of the signing path: it edits helper Info.plist

@@ -27,6 +27,11 @@ async function ensureLoaded(msg: any): Promise<void> {
     }
 
     console.log('[IntentClassifierWorker] Loading zero-shot classifier (mobilebert-uncased-mnli)...');
+    // Intentionally NO dtype → loads fp32 model.onnx. A q8-vs-fp32 eval showed
+    // q8 flips borderline intent labels (e.g. statement↔question on ambiguous
+    // inputs where fp32 is already <0.45 confident), so unlike the embedding
+    // worker this one stays fp32. Do not add dtype:'q8' here without re-running
+    // the intent-quality eval. (MobileBERT fp32 model.onnx is git-tracked.)
     pipe = await pipeline(
       'zero-shot-classification',
       'Xenova/mobilebert-uncased-mnli',
